@@ -25,5 +25,9 @@ app.listen(port, (err) => {
   logger.info({ port }, "Server listening");
 });
 
-startTelegramBot();
-logger.info("Telegram bot initialized");
+if (process.env.NODE_ENV !== "development") {
+  startTelegramBot();
+  logger.info("Telegram bot initialized");
+} else {
+  logger.info("Development mode — bot not started to avoid conflict with deployed instance");
+}
