@@ -191,7 +191,7 @@ export async function finalizeRegistration(sessionId: string, iban: string): Pro
   const session = sessions.get(sessionId);
   if (!session) throw new Error("Session not found. Please restart registration.");
 
-  const body: Record<string, string> = { iban };
+  const body: Record<string, string> = { account_type: "iban", iban };
   if (session.requestId) body.request_id = session.requestId;
 
   const result = await govPost("bike_subsidies_finalize", session.cookies, body) as {
