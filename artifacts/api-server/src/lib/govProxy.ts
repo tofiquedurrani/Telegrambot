@@ -43,7 +43,7 @@ async function check2CaptchaBalance(): Promise<number> {
   return parseFloat(data.request);
 }
 
-async function solveCaptcha(): Promise<string> {
+async function solveCaptcha(onProgress?: (elapsed: number) => void): Promise<string> {
   if (!TWO_CAPTCHA_KEY) throw new Error("TWO_CAPTCHA_API_KEY is not set");
 
   const balance = await check2CaptchaBalance();
@@ -90,6 +90,11 @@ async function solveCaptcha(): Promise<string> {
     }
 
     logger.info({ attempt }, "Captcha not ready yet, retrying...");
+
+    const elapsedSeconds = (attempt + 1) * 5;
+    if (elapsedSeconds % 30 === 0 && onProgress) {
+      onProgress(elapsedSeconds);
+    }
   }
 
   throw new Error("Captcha solving timed out after 3 minutes");
@@ -125,9 +130,13 @@ async function govPost(
   }
 }
 
-export async function startRegistration(cnic: string, regNo: string): Promise<{ sessionId: string }> {
+export async function startRegistration(
+  cnic: string,
+  regNo: string,
+  onProgress?: (elapsed: number) => void
+): Promise<{ sessionId: string }> {
   const cookies = await getGovSession();
-  const captchaToken = await solveCaptcha();
+  const captchaToken = await solveCaptcha(onProgress);
 
   const result = await govPost("bike_subsidies_check_vehicle_eligibility", cookies, {
     cnic,

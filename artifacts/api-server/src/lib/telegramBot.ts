@@ -247,7 +247,9 @@ export function startTelegramBot() {
 
       const s = getState(chatId);
       try {
-        const result = await startRegistration(s.cnic!, s.regNo!);
+        const result = await startRegistration(s.cnic!, s.regNo!, (elapsed) => {
+          bot.sendMessage(chatId, `⏳ Still solving captcha... (${elapsed}s elapsed, please keep waiting)`).catch(() => {});
+        });
         setState(chatId, { sessionId: result.sessionId });
 
         await bot.sendMessage(chatId, "✅ Captcha solved!\n✅ Eligibility verified!\n\n⏳ Sending OTP to your mobile...");
