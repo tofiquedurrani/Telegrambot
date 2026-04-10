@@ -59,7 +59,8 @@ export default function DataForm({ onSubmit }: Props) {
 
   function handleIBAN(e: React.ChangeEvent<HTMLInputElement>) {
     let val = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
-    if (!val.startsWith("PK")) val = "PK" + val.replace(/^PK/i, "");
+    if (val.startsWith("PKPK")) val = val.slice(2);
+    if (!val.startsWith("PK")) val = "PK" + val;
     if (val.length > 24) val = val.slice(0, 24);
     setForm((f) => ({ ...f, iban: val }));
     setErrors((er) => ({ ...er, iban: undefined }));
