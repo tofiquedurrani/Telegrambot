@@ -1,8 +1,6 @@
 import { logger } from "./logger";
 
 const GOV_BASE = "https://fsp.excise.gos.pk";
-const RECAPTCHA_SITE_KEY = "6LczdnQsAAAAAK2YNjS9L6upyt4ng1cQiYzqXU24";
-const TWO_CAPTCHA_KEY = process.env.TWO_CAPTCHA_API_KEY;
 
 interface SessionData {
   cookies: string;
@@ -16,7 +14,7 @@ function makeSessionId(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-async function getGovSession(): Promise<string> {
+export async function prepareGovSession(): Promise<string> {
   const res = await fetch(`${GOV_BASE}/home/bike_subsidies`, {
     headers: {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
@@ -31,69 +29,6 @@ async function getGovSession(): Promise<string> {
 
   logger.info({ status: res.status }, "Got government site session");
   return cookies;
-}
-
-async function check2CaptchaBalance(): Promise<number> {
-  if (!TWO_CAPTCHA_KEY) throw new Error("TWO_CAPTCHA_API_KEY is not set");
-  const res = await fetch(
-    `https://2captcha.com/res.php?key=${TWO_CAPTCHA_KEY}&action=getbalance&json=1`
-  );
-  const data = await res.json() as { status: number; request: string };
-  if (data.status !== 1) throw new Error(`2captcha balance check failed: ${data.request}`);
-  return parseFloat(data.request);
-}
-
-async function solveCaptcha(): Promise<string> {
-  if (!TWO_CAPTCHA_KEY) throw new Error("TWO_CAPTCHA_API_KEY is not set");
-
-  const balance = await check2CaptchaBalance();
-  logger.info({ balance }, "2captcha balance checked");
-  if (balance < 0.01) {
-    throw new Error(`Insufficient 2captcha balance ($${balance.toFixed(4)}). Please top up your 2captcha account at 2captcha.com.`);
-  }
-
-  logger.info("Submitting captcha to 2captcha...");
-
-  const params = new URLSearchParams({
-    key: TWO_CAPTCHA_KEY,
-    method: "userrecaptcha",
-    googlekey: RECAPTCHA_SITE_KEY,
-    pageurl: `${GOV_BASE}/home/bike_subsidies`,
-    enterprise: "1",
-    json: "1",
-  });
-
-  const submitRes = await fetch(`https://2captcha.com/in.php?${params}`);
-  const submitData = await submitRes.json() as { status: number; request: string };
-
-  if (submitData.status !== 1) {
-    throw new Error(`2captcha submission failed: ${submitData.request}`);
-  }
-
-  const captchaId = submitData.request;
-  logger.info({ captchaId }, "Captcha submitted, waiting for solution...");
-
-  for (let attempt = 0; attempt < 36; attempt++) {
-    await new Promise((r) => setTimeout(r, 5000));
-
-    const resultRes = await fetch(
-      `https://2captcha.com/res.php?key=${TWO_CAPTCHA_KEY}&action=get&id=${captchaId}&json=1`
-    );
-    const resultData = await resultRes.json() as { status: number; request: string };
-
-    if (resultData.status === 1) {
-      logger.info("Captcha solved successfully");
-      return resultData.request;
-    }
-
-    if (resultData.request !== "CAPCHA_NOT_READY") {
-      throw new Error(`2captcha error: ${resultData.request}`);
-    }
-
-    logger.info({ attempt }, "Captcha not ready yet, retrying...");
-  }
-
-  throw new Error("Captcha solving timed out after 3 minutes");
 }
 
 async function govPost(
@@ -123,50 +58,17 @@ async function govPost(
   }
 }
 
-async function tryBypassCaptcha(cookies: string, cnic: string, regNo: string): Promise<{ status: string; message: string; token_id?: string } | null> {
-  const dummyTokens = [
-    "03AGdBq24PBCbwiDt2C0SZ7BkBJnoP_dummy_bypass_token",
-    "",
-    "bypass",
-  ];
-
-  for (const token of dummyTokens) {
-    const result = await govPost("bike_subsidies_check_vehicle_eligibility", cookies, {
-      cnic,
-      reg_no: regNo,
-      "g-recaptcha-response": token,
-    }) as { status: string; message: string; token_id?: string };
-
-    logger.info({ result, token: token.slice(0, 20) }, "Bypass captcha attempt result");
-
-    if (result.status === "success") {
-      logger.info("Captcha bypass succeeded!");
-      return result;
-    }
-
-    const msg = (result.message ?? "").toLowerCase();
-    if (!msg.includes("captcha") && !msg.includes("recaptcha") && !msg.includes("robot") && !msg.includes("verify")) {
-      return result;
-    }
-  }
-
-  return null;
-}
-
-export async function startRegistration(cnic: string, regNo: string): Promise<{ sessionId: string }> {
-  const cookies = await getGovSession();
-
-  let result = await tryBypassCaptcha(cookies, cnic, regNo);
-
-  if (!result) {
-    logger.info("Captcha bypass failed, falling back to 2captcha solver...");
-    const captchaToken = await solveCaptcha();
-    result = await govPost("bike_subsidies_check_vehicle_eligibility", cookies, {
-      cnic,
-      reg_no: regNo,
-      "g-recaptcha-response": captchaToken,
-    }) as { status: string; message: string; token_id?: string };
-  }
+export async function startRegistration(
+  cnic: string,
+  regNo: string,
+  captchaToken: string,
+  govCookies: string
+): Promise<{ sessionId: string }> {
+  const result = await govPost("bike_subsidies_check_vehicle_eligibility", govCookies, {
+    cnic,
+    reg_no: regNo,
+    "g-recaptcha-response": captchaToken,
+  }) as { status: string; message: string; token_id?: string };
 
   logger.info({ result }, "Eligibility check result");
 
@@ -176,7 +78,7 @@ export async function startRegistration(cnic: string, regNo: string): Promise<{ 
 
   const sessionId = makeSessionId();
   sessions.set(sessionId, {
-    cookies,
+    cookies: govCookies,
     requestId: result.token_id,
     createdAt: Date.now(),
   });
@@ -211,7 +113,6 @@ export async function verifyOtp(sessionId: string, otp: string): Promise<void> {
   const result = await govPost("bike_subsidies_verify_token", session.cookies, body) as {
     status: string;
     message: string;
-    token_expire_time?: number;
   };
 
   logger.info({ result }, "OTP verify result");
