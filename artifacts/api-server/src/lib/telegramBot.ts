@@ -66,6 +66,7 @@ function isValidMobile(val: string): boolean {
 function normalizeIBAN(val: string): string {
   let clean = val.replace(/\s/g, "").toUpperCase();
   if (clean.startsWith("PKPK")) clean = clean.slice(2);
+  if (!clean.startsWith("PK")) clean = "PK" + clean;
   return clean;
 }
 
