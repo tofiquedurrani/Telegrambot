@@ -1,16 +1,13 @@
 import TelegramBot from "node-telegram-bot-api";
 import { logger } from "./logger";
 import {
-  prepareGovSession,
   startRegistration,
   sendOtp,
   verifyOtp,
   finalizeRegistration,
 } from "./govProxy";
-import { waitForCaptcha, cancelCaptcha } from "./captchaStore";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const DEV_DOMAIN = process.env.REPLIT_DEV_DOMAIN;
 
 if (!TOKEN) {
   throw new Error("TELEGRAM_BOT_TOKEN is not set");
@@ -33,7 +30,6 @@ interface UserState {
   mobile?: string;
   iban?: string;
   sessionId?: string;
-  captchaId?: string;
 }
 
 const states = new Map<number, UserState>();
@@ -71,17 +67,6 @@ function isValidIBAN(val: string): boolean {
   return /^PK[A-Z0-9]{22}$/.test(clean);
 }
 
-function makeCaptchaId(): string {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
-}
-
-function getCaptchaUrl(captchaId: string): string {
-  const domain = DEV_DOMAIN
-    ? `https://${DEV_DOMAIN}`
-    : `http://localhost:${process.env.PORT ?? 8080}`;
-  return `${domain}/captcha/${captchaId}`;
-}
-
 export function startTelegramBot() {
   const bot = new TelegramBot(TOKEN!, { polling: true });
 
@@ -89,15 +74,13 @@ export function startTelegramBot() {
 
   bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
-    const prev = getState(chatId);
-    if (prev.captchaId) cancelCaptcha(prev.captchaId);
     setState(chatId, { step: "await_cnic" });
 
     await bot.sendMessage(
       chatId,
       `*Welcome to Bike Subsidy Registration Bot* 🏍️\n\n` +
       `Government of Sindh — People's Motorcycle Fuel Subsidy Program\n\n` +
-      `I will guide you through registration step by step.\n\n` +
+      `I will automatically register you step by step.\n\n` +
       `*Step 1/5:* Please send your *CNIC number*\nFormat: 42101-1234567-1`,
       { parse_mode: "Markdown" }
     );
@@ -105,8 +88,6 @@ export function startTelegramBot() {
 
   bot.onText(/\/cancel/, async (msg) => {
     const chatId = msg.chat.id;
-    const prev = getState(chatId);
-    if (prev.captchaId) cancelCaptcha(prev.captchaId);
     states.delete(chatId);
     await bot.sendMessage(chatId, "Registration cancelled. Send /start to begin again.");
   });
@@ -119,8 +100,8 @@ export function startTelegramBot() {
       `/cancel — Cancel current registration\n\n` +
       `The bot will:\n` +
       `1. Collect your CNIC, bike reg number, name, mobile, IBAN\n` +
-      `2. Send you a link to complete a quick captcha in your browser (free)\n` +
-      `3. Check your eligibility automatically\n` +
+      `2. Automatically solve the captcha\n` +
+      `3. Check your eligibility\n` +
       `4. Send OTP to your mobile\n` +
       `5. Ask you to enter the OTP\n` +
       `6. Submit your IBAN and complete registration`,
@@ -216,7 +197,6 @@ export function startTelegramBot() {
         await bot.sendMessage(chatId, "❌ Invalid IBAN. Must be 24 characters starting with PK (e.g. PK36SCBL0000001123456702).");
         return;
       }
-
       setState(chatId, { iban, step: "processing" });
 
       const s = getState(chatId);
@@ -228,11 +208,35 @@ export function startTelegramBot() {
         `• Name: \`${s.name}\`\n` +
         `• Mobile: \`${s.mobile}\`\n` +
         `• IBAN: \`${iban}\`\n\n` +
-        `⏳ Preparing registration session...`,
+        `⏳ Starting automated registration...\n` +
+        `🔐 Solving captcha (this takes 30–60 seconds, please wait)...`,
         { parse_mode: "Markdown" }
       );
 
-      runRegistration(bot, chatId, s.cnic!, s.regNo!, s.mobile!, iban);
+      try {
+        const result = await startRegistration(s.cnic!, s.regNo!);
+        setState(chatId, { sessionId: result.sessionId });
+
+        await bot.sendMessage(chatId, "✅ Captcha solved!\n✅ Eligibility verified!\n\n⏳ Sending OTP to your mobile...");
+
+        await sendOtp(result.sessionId, s.mobile!);
+
+        setState(chatId, { step: "await_otp" });
+        await bot.sendMessage(
+          chatId,
+          `✅ OTP sent to \`${s.mobile}\`\n\n*Please enter the 4-digit OTP* you received via SMS:`,
+          { parse_mode: "Markdown" }
+        );
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : "Unknown error";
+        setState(chatId, { step: "idle" });
+        await bot.sendMessage(
+          chatId,
+          `❌ *Registration failed:*\n${errMsg}\n\nSend /start to try again.`,
+          { parse_mode: "Markdown" }
+        );
+        logger.error({ err, chatId }, "Registration start failed");
+      }
       return;
     }
 
@@ -247,11 +251,10 @@ export function startTelegramBot() {
       await bot.sendMessage(chatId, `⏳ Verifying OTP \`${otp}\`...`, { parse_mode: "Markdown" });
 
       try {
-        const currentState = getState(chatId);
-        await verifyOtp(currentState.sessionId!, otp);
+        await verifyOtp(state.sessionId!, otp);
         await bot.sendMessage(chatId, "✅ OTP verified!\n\n⏳ Submitting your IBAN and finalizing registration...");
 
-        const finalResult = await finalizeRegistration(currentState.sessionId!, currentState.iban!);
+        const finalResult = await finalizeRegistration(state.sessionId!, state.iban!);
         setState(chatId, { step: "done" });
 
         await bot.sendMessage(
@@ -280,59 +283,4 @@ export function startTelegramBot() {
   });
 
   return bot;
-}
-
-async function runRegistration(
-  bot: TelegramBot,
-  chatId: number,
-  cnic: string,
-  regNo: string,
-  mobile: string,
-  iban: string
-) {
-  try {
-    const govCookies = await prepareGovSession();
-
-    const captchaId = makeCaptchaId();
-    const captchaUrl = getCaptchaUrl(captchaId);
-    setState(chatId, { captchaId });
-
-    await bot.sendMessage(
-      chatId,
-      `✅ Session ready!\n\n` +
-      `🔐 *One quick step required:*\n\n` +
-      `Please tap the link below, solve the captcha in your browser (takes ~5 seconds), then come back here:\n\n` +
-      `👉 ${captchaUrl}\n\n` +
-      `⏳ Waiting for you to complete the captcha... (link valid for 10 minutes)`,
-      { parse_mode: "Markdown" }
-    );
-
-    const captchaToken = await waitForCaptcha(captchaId);
-    setState(chatId, { captchaId: undefined });
-
-    await bot.sendMessage(chatId, "✅ Captcha solved! Checking eligibility...");
-
-    const { sessionId } = await startRegistration(cnic, regNo, captchaToken, govCookies);
-    setState(chatId, { sessionId });
-
-    await bot.sendMessage(chatId, "✅ Eligible!\n\n⏳ Sending OTP to your mobile...");
-
-    await sendOtp(sessionId, mobile);
-    setState(chatId, { step: "await_otp" });
-
-    await bot.sendMessage(
-      chatId,
-      `✅ OTP sent to \`${mobile}\`\n\n*Please enter the 4-digit OTP* you received via SMS:`,
-      { parse_mode: "Markdown" }
-    );
-  } catch (err: unknown) {
-    const errMsg = err instanceof Error ? err.message : "Unknown error";
-    setState(chatId, { step: "idle", captchaId: undefined });
-    await bot.sendMessage(
-      chatId,
-      `❌ *Registration failed:*\n${errMsg}\n\nSend /start to try again.`,
-      { parse_mode: "Markdown" }
-    );
-    logger.error({ err, chatId }, "Registration failed");
-  }
 }
