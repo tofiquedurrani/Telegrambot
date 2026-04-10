@@ -21,6 +21,7 @@ interface UserState {
     | "await_name"
     | "await_mobile"
     | "await_iban"
+    | "confirm"
     | "processing"
     | "await_otp"
     | "done";
@@ -202,22 +203,48 @@ export function startTelegramBot() {
         await bot.sendMessage(chatId, `❌ Invalid IBAN. Must be 24 characters starting with PK (e.g. PK36SCBL0000001123456702).\n\nYou sent: \`${iban}\` (${iban.length} chars)`, { parse_mode: "Markdown" });
         return;
       }
-      setState(chatId, { iban, step: "processing" });
+      setState(chatId, { iban, step: "confirm" });
 
       const s = getState(chatId);
       await bot.sendMessage(
         chatId,
-        `✅ IBAN: \`${iban}\`\n\n*Summary of your details:*\n` +
+        `*Please confirm your details before submitting:*\n\n` +
         `• CNIC: \`${s.cnic}\`\n` +
         `• Reg No: \`${s.regNo}\`\n` +
         `• Name: \`${s.name}\`\n` +
         `• Mobile: \`${s.mobile}\`\n` +
         `• IBAN: \`${iban}\`\n\n` +
-        `⏳ Starting automated registration...\n` +
-        `🔐 Solving captcha (this takes 30–60 seconds, please wait)...`,
+        `Reply *YES* to submit ✅\nReply *NO* to re-enter your IBAN ✏️`,
         { parse_mode: "Markdown" }
       );
+      return;
+    }
 
+    if (state.step === "confirm") {
+      const reply = text.toUpperCase().trim();
+
+      if (reply === "NO" || reply === "N") {
+        setState(chatId, { step: "await_iban" });
+        await bot.sendMessage(
+          chatId,
+          `Please send your *IBAN Number* again:\n(24 characters, e.g. PK36SCBL0000001123456702)`,
+          { parse_mode: "Markdown" }
+        );
+        return;
+      }
+
+      if (reply !== "YES" && reply !== "Y") {
+        await bot.sendMessage(chatId, `Please reply *YES* to confirm and submit, or *NO* to re-enter your IBAN.`, { parse_mode: "Markdown" });
+        return;
+      }
+
+      setState(chatId, { step: "processing" });
+      await bot.sendMessage(
+        chatId,
+        `⏳ Starting automated registration...\n🔐 Solving captcha (this takes 30–60 seconds, please wait)...`
+      );
+
+      const s = getState(chatId);
       try {
         const result = await startRegistration(s.cnic!, s.regNo!);
         setState(chatId, { sessionId: result.sessionId });
