@@ -33,14 +33,37 @@ async function getGovSession(): Promise<string> {
   return cookies;
 }
 
+async function check2CaptchaBalance(): Promise<number> {
+  if (!TWO_CAPTCHA_KEY) throw new Error("TWO_CAPTCHA_API_KEY is not set");
+  const res = await fetch(
+    `https://2captcha.com/res.php?key=${TWO_CAPTCHA_KEY}&action=getbalance&json=1`
+  );
+  const data = await res.json() as { status: number; request: string };
+  if (data.status !== 1) throw new Error(`2captcha balance check failed: ${data.request}`);
+  return parseFloat(data.request);
+}
+
 async function solveCaptcha(): Promise<string> {
   if (!TWO_CAPTCHA_KEY) throw new Error("TWO_CAPTCHA_API_KEY is not set");
 
+  const balance = await check2CaptchaBalance();
+  logger.info({ balance }, "2captcha balance checked");
+  if (balance < 0.01) {
+    throw new Error(`Insufficient 2captcha balance ($${balance.toFixed(4)}). Please top up your 2captcha account at 2captcha.com.`);
+  }
+
   logger.info("Submitting captcha to 2captcha...");
 
-  const submitRes = await fetch(
-    `https://2captcha.com/in.php?key=${TWO_CAPTCHA_KEY}&method=userrecaptcha&googlekey=${RECAPTCHA_SITE_KEY}&pageurl=${GOV_BASE}/home/bike_subsidies&json=1`
-  );
+  const params = new URLSearchParams({
+    key: TWO_CAPTCHA_KEY,
+    method: "userrecaptcha",
+    googlekey: RECAPTCHA_SITE_KEY,
+    pageurl: `${GOV_BASE}/home/bike_subsidies`,
+    enterprise: "1",
+    json: "1",
+  });
+
+  const submitRes = await fetch(`https://2captcha.com/in.php?${params}`);
   const submitData = await submitRes.json() as { status: number; request: string };
 
   if (submitData.status !== 1) {
@@ -50,7 +73,7 @@ async function solveCaptcha(): Promise<string> {
   const captchaId = submitData.request;
   logger.info({ captchaId }, "Captcha submitted, waiting for solution...");
 
-  for (let attempt = 0; attempt < 24; attempt++) {
+  for (let attempt = 0; attempt < 36; attempt++) {
     await new Promise((r) => setTimeout(r, 5000));
 
     const resultRes = await fetch(
@@ -70,7 +93,7 @@ async function solveCaptcha(): Promise<string> {
     logger.info({ attempt }, "Captcha not ready yet, retrying...");
   }
 
-  throw new Error("Captcha solving timed out after 2 minutes");
+  throw new Error("Captcha solving timed out after 3 minutes");
 }
 
 async function govPost(
