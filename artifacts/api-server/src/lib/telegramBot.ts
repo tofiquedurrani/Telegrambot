@@ -209,8 +209,8 @@ export function startTelegramBot() {
         `• Mobile: \`${s.mobile}\`\n` +
         `• IBAN: \`${iban}\`\n\n` +
         `⏳ Starting automated registration...\n` +
-        `💰 Checking 2captcha balance...\n` +
-        `🔐 Then solving captcha (30-60 seconds)...`,
+        `🔓 Attempting captcha bypass...\n` +
+        `_(If bypass fails, 2captcha will be used as fallback)_`,
         { parse_mode: "Markdown" }
       );
 

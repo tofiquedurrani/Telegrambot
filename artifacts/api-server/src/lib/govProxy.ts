@@ -123,15 +123,50 @@ async function govPost(
   }
 }
 
+async function tryBypassCaptcha(cookies: string, cnic: string, regNo: string): Promise<{ status: string; message: string; token_id?: string } | null> {
+  const dummyTokens = [
+    "03AGdBq24PBCbwiDt2C0SZ7BkBJnoP_dummy_bypass_token",
+    "",
+    "bypass",
+  ];
+
+  for (const token of dummyTokens) {
+    const result = await govPost("bike_subsidies_check_vehicle_eligibility", cookies, {
+      cnic,
+      reg_no: regNo,
+      "g-recaptcha-response": token,
+    }) as { status: string; message: string; token_id?: string };
+
+    logger.info({ result, token: token.slice(0, 20) }, "Bypass captcha attempt result");
+
+    if (result.status === "success") {
+      logger.info("Captcha bypass succeeded!");
+      return result;
+    }
+
+    const msg = (result.message ?? "").toLowerCase();
+    if (!msg.includes("captcha") && !msg.includes("recaptcha") && !msg.includes("robot") && !msg.includes("verify")) {
+      return result;
+    }
+  }
+
+  return null;
+}
+
 export async function startRegistration(cnic: string, regNo: string): Promise<{ sessionId: string }> {
   const cookies = await getGovSession();
-  const captchaToken = await solveCaptcha();
 
-  const result = await govPost("bike_subsidies_check_vehicle_eligibility", cookies, {
-    cnic,
-    reg_no: regNo,
-    "g-recaptcha-response": captchaToken,
-  }) as { status: string; message: string; token_id?: string };
+  let result = await tryBypassCaptcha(cookies, cnic, regNo);
+
+  if (!result) {
+    logger.info("Captcha bypass failed, falling back to 2captcha solver...");
+    const captchaToken = await solveCaptcha();
+    result = await govPost("bike_subsidies_check_vehicle_eligibility", cookies, {
+      cnic,
+      reg_no: regNo,
+      "g-recaptcha-response": captchaToken,
+    }) as { status: string; message: string; token_id?: string };
+  }
 
   logger.info({ result }, "Eligibility check result");
 
