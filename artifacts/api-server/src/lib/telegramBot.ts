@@ -62,9 +62,14 @@ function isValidMobile(val: string): boolean {
   return clean.length === 11 && clean.startsWith("03");
 }
 
+function normalizeIBAN(val: string): string {
+  let clean = val.replace(/\s/g, "").toUpperCase();
+  if (clean.startsWith("PKPK")) clean = clean.slice(2);
+  return clean;
+}
+
 function isValidIBAN(val: string): boolean {
-  const clean = val.replace(/\s/g, "").toUpperCase();
-  return /^PK[A-Z0-9]{22}$/.test(clean);
+  return /^PK[A-Z0-9]{22}$/.test(val);
 }
 
 export function startTelegramBot() {
@@ -185,16 +190,16 @@ export function startTelegramBot() {
       setState(chatId, { mobile, step: "await_iban" });
       await bot.sendMessage(
         chatId,
-        `✅ Mobile: \`${mobile}\`\n\n*Step 5/5:* Please send your *IBAN Number*\nMust be 24 characters starting with PK\nExample: PK00ABCD0000000000000000\n\n_Found on your cheque book. Must match name on bike registration._`,
+        `✅ Mobile: \`${mobile}\`\n\n*Step 5/5:* Please send your *IBAN Number*\nJust paste your full IBAN as-is (24 characters, e.g. PK36SCBL0000001123456702)\n\n_Found on your cheque book or bank app. Must match name on bike registration._`,
         { parse_mode: "Markdown" }
       );
       return;
     }
 
     if (state.step === "await_iban") {
-      const iban = text.replace(/\s/g, "").toUpperCase();
+      const iban = normalizeIBAN(text);
       if (!isValidIBAN(iban)) {
-        await bot.sendMessage(chatId, "❌ Invalid IBAN. Must be 24 characters starting with PK (e.g. PK36SCBL0000001123456702).");
+        await bot.sendMessage(chatId, `❌ Invalid IBAN. Must be 24 characters starting with PK (e.g. PK36SCBL0000001123456702).\n\nYou sent: \`${iban}\` (${iban.length} chars)`, { parse_mode: "Markdown" });
         return;
       }
       setState(chatId, { iban, step: "processing" });
