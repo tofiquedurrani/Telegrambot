@@ -164,8 +164,12 @@ export async function sendOtp(sessionId: string, mobile: string): Promise<{ time
   const session = sessions.get(sessionId);
   if (!session) throw new Error("Session not found. Please restart registration.");
 
+  // Convert local format (03001234567) to international format (923001234567)
+  // so the government site does not double-add +92
+  const intlMobile = mobile.startsWith("0") ? "92" + mobile.slice(1) : mobile;
+
   const result = await govPost("bike_subsidies_get_otp", session.cookies, {
-    mobile,
+    mobile: intlMobile,
   }) as { status: string; message: string; token_expire_time?: number };
 
   logger.info({ result }, "Send OTP result");
