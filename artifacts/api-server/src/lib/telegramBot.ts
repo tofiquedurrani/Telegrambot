@@ -1,5 +1,7 @@
 import TelegramBot from "node-telegram-bot-api";
 import { logger } from "./logger";
+import fs from "fs";
+import path from "path";
 import {
   startRegistration,
   sendOtp,
@@ -8,11 +10,68 @@ import {
 } from "./govProxy";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID);
 
-if (!TOKEN) {
-  throw new Error("TELEGRAM_BOT_TOKEN is not set");
+if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is not set");
+if (!ADMIN_ID) throw new Error("ADMIN_TELEGRAM_ID is not set");
+
+// ─── Paid users storage ───────────────────────────────────────────────────────
+const PAID_FILE = path.resolve("./paid_users.json");
+
+function loadPaidUsers(): Set<number> {
+  try {
+    if (fs.existsSync(PAID_FILE)) {
+      const data = JSON.parse(fs.readFileSync(PAID_FILE, "utf-8"));
+      return new Set(data);
+    }
+  } catch {}
+  return new Set();
 }
 
+function savePaidUsers(set: Set<number>) {
+  fs.writeFileSync(PAID_FILE, JSON.stringify([...set]));
+}
+
+const paidUsers = loadPaidUsers();
+
+function isApproved(chatId: number): boolean {
+  return paidUsers.has(chatId);
+}
+
+function approveUser(chatId: number) {
+  paidUsers.add(chatId);
+  savePaidUsers(paidUsers);
+}
+
+// ─── Free usage tracking ──────────────────────────────────────────────────────
+const USED_FREE_FILE = path.resolve("./used_free.json");
+
+function loadUsedFree(): Set<number> {
+  try {
+    if (fs.existsSync(USED_FREE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(USED_FREE_FILE, "utf-8"));
+      return new Set(data);
+    }
+  } catch {}
+  return new Set();
+}
+
+function saveUsedFree(set: Set<number>) {
+  fs.writeFileSync(USED_FREE_FILE, JSON.stringify([...set]));
+}
+
+const usedFree = loadUsedFree();
+
+function hasUsedFree(chatId: number): boolean {
+  return usedFree.has(chatId);
+}
+
+function markUsedFree(chatId: number) {
+  usedFree.add(chatId);
+  saveUsedFree(usedFree);
+}
+
+// ─── User state ───────────────────────────────────────────────────────────────
 interface UserState {
   step:
     | "idle"
@@ -36,17 +95,15 @@ interface UserState {
 const states = new Map<number, UserState>();
 
 function getState(chatId: number): UserState {
-  if (!states.has(chatId)) {
-    states.set(chatId, { step: "idle" });
-  }
+  if (!states.has(chatId)) states.set(chatId, { step: "idle" });
   return states.get(chatId)!;
 }
 
 function setState(chatId: number, update: Partial<UserState>) {
-  const current = getState(chatId);
-  states.set(chatId, { ...current, ...update });
+  states.set(chatId, { ...getState(chatId), ...update });
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 function formatCNIC(value: string): string {
   const d = value.replace(/\D/g, "").slice(0, 13);
   if (d.length <= 5) return d;
@@ -74,82 +131,129 @@ function isValidIBAN(val: string): boolean {
   return /^PK[A-Z0-9]{22}$/.test(val);
 }
 
+// ─── Bot ──────────────────────────────────────────────────────────────────────
 export function startTelegramBot() {
   const bot = new TelegramBot(TOKEN!, { polling: true });
-
   logger.info("Telegram bot started with polling");
 
-  bot.onText(/\/start/, async (msg) => {
-    const chatId = msg.chat.id;
-    setState(chatId, { step: "await_cnic" });
+  // Admin: approve a user
+  bot.onText(/\/approve (.+)/, async (msg, match) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    const targetId = Number(match![1].trim());
+    if (isNaN(targetId)) {
+      await bot.sendMessage(ADMIN_ID, "Invalid ID. Usage: /approve 123456789");
+      return;
+    }
+    approveUser(targetId);
+    await bot.sendMessage(ADMIN_ID, `OK! User ${targetId} approved.`);
+    await bot
+      .sendMessage(
+        targetId,
+        "✅ Payment confirmed by admin! Send /start to register again."
+      )
+      .catch(() => {});
+  });
 
+  // Admin: stats
+  bot.onText(/\/stats/, async (msg) => {
+    if (msg.chat.id !== ADMIN_ID) return;
     await bot.sendMessage(
-      chatId,
-      `*Welcome to Bike Subsidy Registration Bot* 🏍️\n\n` +
-      `Government of Sindh — People's Motorcycle Fuel Subsidy Program\n\n` +
-      `I will automatically register you step by step.\n\n` +
-      `*Step 1/5:* Please send your *CNIC number*\nFormat: 42101-1234567-1`,
-      { parse_mode: "Markdown" }
+      ADMIN_ID,
+      `Stats:\nFree used: ${usedFree.size}\nPaid users: ${paidUsers.size}`
     );
   });
 
-  bot.onText(/\/cancel/, async (msg) => {
-    const chatId = msg.chat.id;
-    states.delete(chatId);
-    await bot.sendMessage(chatId, "Registration cancelled. Send /start to begin again.");
+  // /myid — show Telegram ID
+  bot.onText(/\/myid/, async (msg) => {
+    await bot.sendMessage(
+      msg.chat.id,
+      `Your Telegram ID: ${msg.chat.id}`
+    );
   });
 
+  // /start
+  bot.onText(/\/start/, async (msg) => {
+    const chatId = msg.chat.id;
+
+    if (hasUsedFree(chatId) && !isApproved(chatId)) {
+      await bot.sendMessage(
+        chatId,
+        `✅ You have used your FREE registration.\n\n` +
+          `To register again, please pay Rs 150:\n\n` +
+          `Easypaisa / JazzCash:\n` +
+          `Number: 03063076001\n` +
+          `Name: Tofique Ahmed\n\n` +
+          `After payment, send screenshot on WhatsApp: 03063076001\n\n` +
+          `Also send your Telegram ID: ${chatId}\n\n` +
+          `You will be notified here once confirmed.`
+      );
+      return;
+    }
+
+    setState(chatId, { step: "await_cnic" });
+    await bot.sendMessage(
+      chatId,
+      `Welcome to Bike Subsidy Registration Bot\n\n` +
+        `Government of Sindh — Motorcycle Fuel Subsidy Program\n\n` +
+        (hasUsedFree(chatId) ? "" : `First registration is FREE!\n\n`) +
+        `Step 1/5: Please send your CNIC number\nFormat: 42101-1234567-1`
+    );
+  });
+
+  // /cancel
+  bot.onText(/\/cancel/, async (msg) => {
+    states.delete(msg.chat.id);
+    await bot.sendMessage(
+      msg.chat.id,
+      "Cancelled. Send /start to begin again."
+    );
+  });
+
+  // /help
   bot.onText(/\/help/, async (msg) => {
     await bot.sendMessage(
       msg.chat.id,
-      `*Bike Subsidy Bot Help*\n\n` +
-      `/start — Start registration\n` +
-      `/cancel — Cancel current registration\n\n` +
-      `The bot will:\n` +
-      `1. Collect your CNIC, bike reg number, name, mobile, IBAN\n` +
-      `2. Automatically solve the captcha\n` +
-      `3. Check your eligibility\n` +
-      `4. Send OTP to your mobile\n` +
-      `5. Ask you to enter the OTP\n` +
-      `6. Submit your IBAN and complete registration`,
-      { parse_mode: "Markdown" }
+      `Bike Subsidy Bot Help\n\n` +
+        `/start — Start registration\n` +
+        `/cancel — Cancel registration\n` +
+        `/myid — Show your Telegram ID\n\n` +
+        `First registration is FREE.\n` +
+        `Additional registrations: Rs 150 via Easypaisa/JazzCash\n` +
+        `Number: 03063076001 (Tofique Ahmed)`
     );
   });
 
+  // Message handler
   bot.on("message", async (msg) => {
     const chatId = msg.chat.id;
     const text = (msg.text ?? "").trim();
-
     if (!text || text.startsWith("/")) return;
 
     const state = getState(chatId);
 
     if (state.step === "idle") {
-      await bot.sendMessage(chatId, "Send /start to begin registration.");
+      await bot.sendMessage(chatId, "Send /start to begin.");
       return;
     }
-
     if (state.step === "processing") {
-      await bot.sendMessage(chatId, "⏳ Please wait, processing your registration...");
+      await bot.sendMessage(chatId, "Please wait, processing...");
       return;
     }
-
     if (state.step === "done") {
-      await bot.sendMessage(chatId, "✅ Registration already completed. Send /start to register again.");
+      await bot.sendMessage(chatId, "Registration complete. Send /start to register again.");
       return;
     }
 
     if (state.step === "await_cnic") {
       const formatted = formatCNIC(text);
       if (!isValidCNIC(formatted)) {
-        await bot.sendMessage(chatId, "❌ Invalid CNIC format. Please enter in format: *42101-1234567-1*", { parse_mode: "Markdown" });
+        await bot.sendMessage(chatId, "Invalid CNIC. Format: 42101-1234567-1");
         return;
       }
       setState(chatId, { cnic: formatted, step: "await_reg_no" });
       await bot.sendMessage(
         chatId,
-        `✅ CNIC: \`${formatted}\`\n\n*Step 2/5:* Please send your *Motorcycle Registration Number*\nExample: ABC-123 or KHI-123`,
-        { parse_mode: "Markdown" }
+        `CNIC: ${formatted}\n\nStep 2/5: Send your Motorcycle Registration Number\nExample: ABC-123`
       );
       return;
     }
@@ -157,28 +261,26 @@ export function startTelegramBot() {
     if (state.step === "await_reg_no") {
       const regNo = text.toUpperCase().replace(/[^A-Z0-9\-]/g, "");
       if (regNo.length < 3) {
-        await bot.sendMessage(chatId, "❌ Invalid registration number. Please enter your bike's registration number (e.g. ABC-123).");
+        await bot.sendMessage(chatId, "Invalid registration number. Example: ABC-123");
         return;
       }
       setState(chatId, { regNo, step: "await_name" });
       await bot.sendMessage(
         chatId,
-        `✅ Reg No: \`${regNo}\`\n\n*Step 3/5:* Please send your *Full Name*\n(as it appears on your CNIC)`,
-        { parse_mode: "Markdown" }
+        `Reg No: ${regNo}\n\nStep 3/5: Send your Full Name (as on CNIC)`
       );
       return;
     }
 
     if (state.step === "await_name") {
       if (text.length < 3) {
-        await bot.sendMessage(chatId, "❌ Please enter your full name (at least 3 characters).");
+        await bot.sendMessage(chatId, "Please enter your full name.");
         return;
       }
       setState(chatId, { name: text, step: "await_mobile" });
       await bot.sendMessage(
         chatId,
-        `✅ Name: \`${text}\`\n\n*Step 4/5:* Please send your *Mobile Number*\nMust be 11 digits starting with 03 (e.g. 03001234567)\n⚠️ You will receive an OTP on this number.`,
-        { parse_mode: "Markdown" }
+        `Name: ${text}\n\nStep 4/5: Send your Mobile Number\nExample: 03001234567`
       );
       return;
     }
@@ -186,14 +288,13 @@ export function startTelegramBot() {
     if (state.step === "await_mobile") {
       const mobile = text.replace(/\D/g, "");
       if (!isValidMobile(mobile)) {
-        await bot.sendMessage(chatId, "❌ Invalid mobile number. Must be 11 digits starting with 03 (e.g. 03001234567).");
+        await bot.sendMessage(chatId, "Invalid mobile. Must be 11 digits starting with 03.");
         return;
       }
       setState(chatId, { mobile, step: "await_iban" });
       await bot.sendMessage(
         chatId,
-        `✅ Mobile: \`${mobile}\`\n\n*Step 5/5:* Please send your *IBAN Number*\nJust paste your full IBAN as-is (24 characters, e.g. PK36SCBL0000001123456702)\n\n_Found on your cheque book or bank app. Must match name on bike registration._`,
-        { parse_mode: "Markdown" }
+        `Mobile: ${mobile}\n\nStep 5/5: Send your IBAN\n24 characters, e.g. PK36SCBL0000001123456702`
       );
       return;
     }
@@ -201,74 +302,71 @@ export function startTelegramBot() {
     if (state.step === "await_iban") {
       const iban = normalizeIBAN(text);
       if (!isValidIBAN(iban)) {
-        await bot.sendMessage(chatId, `❌ Invalid IBAN. Must be 24 characters starting with PK (e.g. PK36SCBL0000001123456702).\n\nYou sent: \`${iban}\` (${iban.length} chars)`, { parse_mode: "Markdown" });
+        await bot.sendMessage(
+          chatId,
+          `Invalid IBAN. Must be 24 characters starting with PK.\nYou sent: ${iban} (${iban.length} chars)`
+        );
         return;
       }
       setState(chatId, { iban, step: "confirm" });
-
       const s = getState(chatId);
       await bot.sendMessage(
         chatId,
-        `*Please confirm your details before submitting:*\n\n` +
-        `• CNIC: \`${s.cnic}\`\n` +
-        `• Reg No: \`${s.regNo}\`\n` +
-        `• Name: \`${s.name}\`\n` +
-        `• Mobile: \`${s.mobile}\`\n` +
-        `• IBAN: \`${iban}\`\n\n` +
-        `Reply *YES* to submit ✅\nReply *NO* to re-enter your IBAN ✏️`,
-        { parse_mode: "Markdown" }
+        `Please confirm your details:\n\n` +
+          `CNIC: ${s.cnic}\n` +
+          `Reg No: ${s.regNo}\n` +
+          `Name: ${s.name}\n` +
+          `Mobile: ${s.mobile}\n` +
+          `IBAN: ${iban}\n\n` +
+          `Reply YES to submit\nReply NO to re-enter IBAN`
       );
       return;
     }
 
     if (state.step === "confirm") {
       const reply = text.toUpperCase().trim();
-
       if (reply === "NO" || reply === "N") {
         setState(chatId, { step: "await_iban" });
-        await bot.sendMessage(
-          chatId,
-          `Please send your *IBAN Number* again:\n(24 characters, e.g. PK36SCBL0000001123456702)`,
-          { parse_mode: "Markdown" }
-        );
+        await bot.sendMessage(chatId, "Please send your IBAN again:");
         return;
       }
-
       if (reply !== "YES" && reply !== "Y") {
-        await bot.sendMessage(chatId, `Please reply *YES* to confirm and submit, or *NO* to re-enter your IBAN.`, { parse_mode: "Markdown" });
+        await bot.sendMessage(chatId, "Reply YES to confirm or NO to re-enter IBAN.");
         return;
       }
 
       setState(chatId, { step: "processing" });
       await bot.sendMessage(
         chatId,
-        `⏳ Starting automated registration...\n🔐 Solving captcha (this takes 30–60 seconds, please wait)...`
+        `Starting registration...\nSolving captcha (30-60 seconds, please wait)...`
       );
 
       const s = getState(chatId);
       try {
         const result = await startRegistration(s.cnic!, s.regNo!, (elapsed) => {
-          bot.sendMessage(chatId, `⏳ Still solving captcha... (${elapsed}s elapsed, please keep waiting)`).catch(() => {});
+          bot
+            .sendMessage(chatId, `Still solving captcha... (${elapsed}s, please wait)`)
+            .catch(() => {});
         });
         setState(chatId, { sessionId: result.sessionId });
-
-        await bot.sendMessage(chatId, "✅ Captcha solved!\n✅ Eligibility verified!\n\n⏳ Sending OTP to your mobile...");
-
+        await bot.sendMessage(chatId, "Captcha solved!\nEligibility verified!\nSending OTP...");
         await sendOtp(result.sessionId, s.mobile!);
-
         setState(chatId, { step: "await_otp" });
         await bot.sendMessage(
           chatId,
-          `✅ OTP sent to \`${s.mobile}\`\n\n*Please enter the 4-digit OTP* you received via SMS:`,
-          { parse_mode: "Markdown" }
+          `OTP sent to ${s.mobile}\n\nPlease enter the 4-digit OTP:`
         );
       } catch (err: unknown) {
-        const errMsg = err instanceof Error ? err.message : "Unknown error";
+        const errMsg = (
+          (err instanceof Error ? err.message : "Unknown error") || ""
+        )
+          .replace(/<[^>]*>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
         setState(chatId, { step: "idle" });
         await bot.sendMessage(
           chatId,
-          `❌ *Registration failed:*\n${errMsg}\n\nSend /start to try again.`,
-          { parse_mode: "Markdown" }
+          `Registration failed:\n${errMsg}\n\nSend /start to try again.`
         );
         logger.error({ err, chatId }, "Registration start failed");
       }
@@ -278,34 +376,48 @@ export function startTelegramBot() {
     if (state.step === "await_otp") {
       const otp = text.replace(/\D/g, "");
       if (otp.length !== 4) {
-        await bot.sendMessage(chatId, "❌ Please enter the 4-digit OTP received via SMS.");
+        await bot.sendMessage(chatId, "Please enter the 4-digit OTP.");
         return;
       }
-
       setState(chatId, { step: "processing" });
-      await bot.sendMessage(chatId, `⏳ Verifying OTP \`${otp}\`...`, { parse_mode: "Markdown" });
+      await bot.sendMessage(chatId, `Verifying OTP ${otp}...`);
 
       try {
         await verifyOtp(state.sessionId!, otp);
-        await bot.sendMessage(chatId, "✅ OTP verified!\n\n⏳ Submitting your IBAN and finalizing registration...");
-
-        const finalResult = await finalizeRegistration(state.sessionId!, state.iban!);
+        await bot.sendMessage(chatId, "OTP verified!\nSubmitting IBAN...");
+        const finalResult = await finalizeRegistration(
+          state.sessionId!,
+          state.iban!
+        );
         setState(chatId, { step: "done" });
+
+        if (!hasUsedFree(chatId)) markUsedFree(chatId);
+
+        bot
+          .sendMessage(
+            ADMIN_ID,
+            `New registration done!\nUser ID: ${chatId}\nCNIC: ${state.cnic}\nPaid user: ${isApproved(chatId) ? "Yes" : "No (free)"}`
+          )
+          .catch(() => {});
 
         await bot.sendMessage(
           chatId,
-          `🎉 *Registration Complete!*\n\n${finalResult.message}\n\n` +
-          `You will receive a tracking ID via SMS. The fuel subsidy of Rs 2,000/month will be deposited to your IBAN.\n\n` +
-          `Send /start if you need to register again.`,
-          { parse_mode: "Markdown" }
+          `Registration Complete!\n\n${finalResult.message}\n\n` +
+            `You will receive a tracking SMS.\n\n` +
+            `To register a family member, send /start.\n` +
+            `Additional registrations cost Rs 150 via Easypaisa/JazzCash: 03063076001`
         );
       } catch (err: unknown) {
-        const errMsg = err instanceof Error ? err.message : "Unknown error";
+        const errMsg = (
+          (err instanceof Error ? err.message : "Unknown error") || ""
+        )
+          .replace(/<[^>]*>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
         setState(chatId, { step: "await_otp" });
         await bot.sendMessage(
           chatId,
-          `❌ *OTP verification failed:*\n${errMsg}\n\nPlease try entering the OTP again.`,
-          { parse_mode: "Markdown" }
+          `OTP failed:\n${errMsg}\n\nPlease try the OTP again.`
         );
         logger.error({ err, chatId }, "OTP verification failed");
       }
