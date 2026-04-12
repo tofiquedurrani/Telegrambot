@@ -55,12 +55,14 @@ async function solveCaptcha(onProgress?: (elapsed: number) => void): Promise<str
   logger.info("Submitting captcha to 2captcha...");
 
   const params = new URLSearchParams({
-    key: TWO_CAPTCHA_KEY,
-    method: "userrecaptcha",
-    googlekey: RECAPTCHA_SITE_KEY,
-    pageurl: `${GOV_BASE}/home/bike_subsidies`,
-    json: "1",
-  });
+  key: TWO_CAPTCHA_KEY,
+  method: "userrecaptcha",
+  googlekey: RECAPTCHA_SITE_KEY,
+  pageurl: `${GOV_BASE}/home/bike_subsidies`,
+  json: "1",
+  soft_id: "0",
+  priority: "10",
+});
 
   const submitRes = await fetch(`https://2captcha.com/in.php?${params}`);
   const submitData = await submitRes.json() as { status: number; request: string };
