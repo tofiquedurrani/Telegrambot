@@ -3,7 +3,6 @@ import { solveCaptcha } from "./govProxy";
 
 const FSP_BASE = "https://fsp.excise.gos.pk";
 const ELIGIBILITY_URL = `${FSP_BASE}/Home/bike_subsidies_check_vehicle_eligibility/`;
-const RECAPTCHA_SITE_KEY = "6LczdnQsAAAAAK2YNjS9L6upyt4ng1cQiYzqXU24";
 
 async function getSessionCookies(): Promise<string> {
   const res = await fetch(`${FSP_BASE}/`, {
@@ -34,7 +33,9 @@ export async function searchVehicle(
   const cookies = await getSessionCookies();
 
   onProgress?.("Solving captcha (30-60 seconds, please wait)...");
-  const captchaToken = await solveCaptcha(FSP_BASE + "/", RECAPTCHA_SITE_KEY, onProgress);
+  const captchaToken = await solveCaptcha(
+    onProgress ? (elapsed: number) => onProgress(`Still solving captcha... (${elapsed}s)`) : undefined
+  );
 
   onProgress?.("Captcha solved! Checking vehicle...");
 
