@@ -6,7 +6,6 @@ const HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
-  "Accept-Encoding": "gzip, deflate, br",
   "Connection": "keep-alive",
 };
 
@@ -50,7 +49,6 @@ async function getPageToken(): Promise<{ token: string; cookies: string }> {
 function parseVehicleDetails(html: string): Record<string, string> {
   const result: Record<string, string> = {};
 
-  // Try parsing table rows
   const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
   let rowMatch;
   while ((rowMatch = rowRegex.exec(html)) !== null) {
@@ -66,7 +64,6 @@ function parseVehicleDetails(html: string): Record<string, string> {
     }
   }
 
-  // Also try definition list format
   const dtRegex = /<dt[^>]*>([\s\S]*?)<\/dt>\s*<dd[^>]*>([\s\S]*?)<\/dd>/gi;
   let dtMatch;
   while ((dtMatch = dtRegex.exec(html)) !== null) {
@@ -76,13 +73,6 @@ function parseVehicleDetails(html: string): Record<string, string> {
   }
 
   return result;
-}
-
-export interface VehicleResult {
-  ownerName: string;
-  cnic: string;
-  regNo: string;
-  status: string;
 }
 
 export async function searchVehicle(
