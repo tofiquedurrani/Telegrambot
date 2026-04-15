@@ -1,80 +1,77 @@
 import { logger } from "./logger";
+import { solveCaptcha } from "./govProxy";
 
-const BASE_URL = "https://www.excise.gos.pk/vehicle/vehicle_search";
+const FSP_BASE = "https://fsp.excise.gos.pk";
+const ELIGIBILITY_URL = `${FSP_BASE}/Home/bike_subsidies_check_vehicle_eligibility/`;
+const RECAPTCHA_SITE_KEY = "6LczdnQsAAAAAK2YNjS9L6upyt4ng1cQiYzqXU24";
 
-const HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-  "Referer": BASE_URL,
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.9",
-};
-
-async function getCsrfToken(): Promise<{ token: string; cookies: string }> {
-  const res = await fetch(BASE_URL, { headers: HEADERS, redirect: "follow" });
+async function getSessionCookies(): Promise<string> {
+  const res = await fetch(`${FSP_BASE}/`, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+  });
   const rawCookies = res.headers.getSetCookie?.() ?? [];
-  const cookies = rawCookies.map((c) => c.split(";")[0]).join("; ");
-  const html = await res.text();
-
-  const metaMatch = html.match(/<meta name="csrf-token" content="([^"]+)"/);
-  if (metaMatch) return { token: metaMatch[1], cookies };
-
-  const inputMatch = html.match(/<input[^>]+name="_token"[^>]+value="([^"]+)"/);
-  if (inputMatch) return { token: inputMatch[1], cookies };
-
-  throw new Error("Could not connect to vehicle search. Try again later.");
+  return rawCookies.map((c) => c.split(";")[0]).join("; ");
 }
 
-function parseVehicleTable(html: string): Record<string, string> {
-  const result: Record<string, string> = {};
-  const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-  let rowMatch;
-  while ((rowMatch = rowRegex.exec(html)) !== null) {
-    const cells: string[] = [];
-    const cellRegex = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
-    let cellMatch;
-    while ((cellMatch = cellRegex.exec(rowMatch[1])) !== null) {
-      cells.push(cellMatch[1].replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim());
-    }
-    if (cells.length >= 2 && cells[0] && cells[1]) {
-      result[cells[0]] = cells[1];
-    }
-  }
-  return result;
+export interface VehicleResult {
+  ownerName: string;
+  cnic: string;
+  regNo: string;
+  status: string;
 }
 
-export async function searchVehicle(regNo: string): Promise<Record<string, string>> {
-  logger.info({ regNo }, "Searching vehicle");
+export async function searchVehicle(
+  cnic: string,
+  regNo: string,
+  onProgress?: (msg: string) => void
+): Promise<VehicleResult> {
+  logger.info({ cnic, regNo }, "Vehicle search started");
 
-  const { token, cookies } = await getCsrfToken();
+  onProgress?.("Getting session...");
+  const cookies = await getSessionCookies();
 
-  const res = await fetch(BASE_URL, {
+  onProgress?.("Solving captcha (30-60 seconds, please wait)...");
+  const captchaToken = await solveCaptcha(FSP_BASE + "/", RECAPTCHA_SITE_KEY, onProgress);
+
+  onProgress?.("Captcha solved! Checking vehicle...");
+
+  const res = await fetch(ELIGIBILITY_URL, {
     method: "POST",
     headers: {
-      ...HEADERS,
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
       "Content-Type": "application/x-www-form-urlencoded",
       "Cookie": cookies,
+      "Referer": FSP_BASE + "/",
+      "Origin": FSP_BASE,
+      "X-Requested-With": "XMLHttpRequest",
+      "Accept": "application/json, text/javascript, */*; q=0.01",
     },
     body: new URLSearchParams({
-      _token: token,
-      registration_no: regNo.trim().toUpperCase(),
+      cnic: cnic.trim(),
+      reg_no: regNo.trim().toUpperCase(),
+      "g-recaptcha-response": captchaToken,
     }).toString(),
   });
 
-  const html = await res.text();
+  const data = await res.json() as { status: string; message?: string; owner_name?: string; token_id?: string };
+  logger.info({ data }, "Vehicle search response");
 
-  if (
-    html.toLowerCase().includes("no record") ||
-    html.toLowerCase().includes("not found") ||
-    html.toLowerCase().includes("invalid")
-  ) {
-    throw new Error("No vehicle found for: " + regNo.toUpperCase());
+  if (data.status === "success" && data.owner_name) {
+    return {
+      ownerName: data.owner_name,
+      cnic: cnic.trim(),
+      regNo: regNo.trim().toUpperCase(),
+      status: "found",
+    };
   }
 
-  const data = parseVehicleTable(html);
-
-  if (Object.keys(data).length === 0) {
-    throw new Error("No details found. Check registration number and try again.");
+  if (data.status === "error" || data.status === "warning") {
+    const msg = typeof data.message === "string" ? data.message : JSON.stringify(data.message);
+    throw new Error(msg || "Vehicle not found");
   }
 
-  return data;
+  throw new Error("Unexpected response from vehicle search");
 }
