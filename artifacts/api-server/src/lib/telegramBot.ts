@@ -8,6 +8,7 @@ import {
   verifyOtp,
   finalizeRegistration,
 } from "./govProxy";
+import { searchVehicle } from "./vehicleSearch";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID);
@@ -136,7 +137,28 @@ export function startTelegramBot() {
   const bot = new TelegramBot(TOKEN!, { polling: true });
   logger.info("Telegram bot started with polling");
 
-  // Admin: approve a user
+  // Vehicle search state
+  const vehicleSearch = new Map<number, string>();
+
+  // ── /bike command ──────────────────────────────────────────────────────────
+  bot.onText(/\/bike/, async (msg) => {
+    vehicleSearch.set(msg.chat.id, "bike");
+    await bot.sendMessage(
+      msg.chat.id,
+      "Send your bike registration number:\nExample: NFH-3057 or KHI-123"
+    );
+  });
+
+  // ── /car command ───────────────────────────────────────────────────────────
+  bot.onText(/\/car/, async (msg) => {
+    vehicleSearch.set(msg.chat.id, "car");
+    await bot.sendMessage(
+      msg.chat.id,
+      "Send your car registration number:\nExample: KHI-AB-1234 or LHR-5678"
+    );
+  });
+
+  // ── Admin: approve a user ──────────────────────────────────────────────────
   bot.onText(/\/approve (.+)/, async (msg, match) => {
     if (msg.chat.id !== ADMIN_ID) return;
     const targetId = Number(match![1].trim());
@@ -147,14 +169,11 @@ export function startTelegramBot() {
     approveUser(targetId);
     await bot.sendMessage(ADMIN_ID, `OK! User ${targetId} approved.`);
     await bot
-      .sendMessage(
-        targetId,
-        "✅ Payment confirmed by admin! Send /start to register again."
-      )
+      .sendMessage(targetId, "Payment confirmed! Send /start to register again.")
       .catch(() => {});
   });
 
-  // Admin: stats
+  // ── Admin: stats ───────────────────────────────────────────────────────────
   bot.onText(/\/stats/, async (msg) => {
     if (msg.chat.id !== ADMIN_ID) return;
     await bot.sendMessage(
@@ -163,28 +182,25 @@ export function startTelegramBot() {
     );
   });
 
-  // /myid — show Telegram ID
+  // ── /myid ──────────────────────────────────────────────────────────────────
   bot.onText(/\/myid/, async (msg) => {
-    await bot.sendMessage(
-      msg.chat.id,
-      `Your Telegram ID: ${msg.chat.id}`
-    );
+    await bot.sendMessage(msg.chat.id, `Your Telegram ID: ${msg.chat.id}`);
   });
 
-  // /start
+  // ── /start ─────────────────────────────────────────────────────────────────
   bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
 
     if (hasUsedFree(chatId) && !isApproved(chatId)) {
       await bot.sendMessage(
         chatId,
-        `✅ You have used your FREE registration.\n\n` +
+        `You have used your FREE registration.\n\n` +
           `To register again, please pay Rs 150:\n\n` +
           `Easypaisa / JazzCash:\n` +
           `Number: 03063076001\n` +
           `Name: Tofique Ahmed\n\n` +
-          `After payment, send screenshot on WhatsApp: 03063076001\n\n` +
-          `Also send your Telegram ID: ${chatId}\n\n` +
+          `After payment send screenshot on WhatsApp: 03063076001\n\n` +
+          `Also include your Telegram ID: ${chatId}\n\n` +
           `You will be notified here once confirmed.`
       );
       return;
@@ -194,40 +210,62 @@ export function startTelegramBot() {
     await bot.sendMessage(
       chatId,
       `Welcome to Bike Subsidy Registration Bot\n\n` +
-        `Government of Sindh — Motorcycle Fuel Subsidy Program\n\n` +
+        `Government of Sindh - Motorcycle Fuel Subsidy Program\n\n` +
         (hasUsedFree(chatId) ? "" : `First registration is FREE!\n\n`) +
         `Step 1/5: Please send your CNIC number\nFormat: 42101-1234567-1`
     );
   });
 
-  // /cancel
+  // ── /cancel ────────────────────────────────────────────────────────────────
   bot.onText(/\/cancel/, async (msg) => {
     states.delete(msg.chat.id);
-    await bot.sendMessage(
-      msg.chat.id,
-      "Cancelled. Send /start to begin again."
-    );
+    vehicleSearch.delete(msg.chat.id);
+    await bot.sendMessage(msg.chat.id, "Cancelled. Send /start to begin again.");
   });
 
-  // /help
+  // ── /help ──────────────────────────────────────────────────────────────────
   bot.onText(/\/help/, async (msg) => {
     await bot.sendMessage(
       msg.chat.id,
-      `Bike Subsidy Bot Help\n\n` +
-        `/start — Start registration\n` +
-        `/cancel — Cancel registration\n` +
-        `/myid — Show your Telegram ID\n\n` +
+      `Bike Subsidy Bot - Commands:\n\n` +
+        `/start - Start bike subsidy registration\n` +
+        `/bike - Check bike details by registration number\n` +
+        `/car - Check car details by registration number\n` +
+        `/myid - Show your Telegram ID\n` +
+        `/cancel - Cancel current action\n\n` +
         `First registration is FREE.\n` +
-        `Additional registrations: Rs 150 via Easypaisa/JazzCash\n` +
-        `Number: 03063076001 (Tofique Ahmed)`
+        `Additional registrations: Rs 150\n` +
+        `Payment: Easypaisa/JazzCash 03063076001 (Tofique Ahmed)`
     );
   });
 
-  // Message handler
+  // ── Message handler ────────────────────────────────────────────────────────
   bot.on("message", async (msg) => {
     const chatId = msg.chat.id;
     const text = (msg.text ?? "").trim();
     if (!text || text.startsWith("/")) return;
+
+    // Handle vehicle search
+    if (vehicleSearch.has(chatId)) {
+      const type = vehicleSearch.get(chatId)!;
+      vehicleSearch.delete(chatId);
+      await bot.sendMessage(
+        chatId,
+        `Searching ${type} details for ${text.toUpperCase()}, please wait...`
+      );
+      try {
+        const data = await searchVehicle(text);
+        let reply = `Vehicle Details for ${text.toUpperCase()}:\n\n`;
+        for (const [key, value] of Object.entries(data)) {
+          reply += `${key}: ${value}\n`;
+        }
+        await bot.sendMessage(chatId, reply);
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : "Search failed";
+        await bot.sendMessage(chatId, `Could not find vehicle:\n${errMsg}`);
+      }
+      return;
+    }
 
     const state = getState(chatId);
 
@@ -240,7 +278,10 @@ export function startTelegramBot() {
       return;
     }
     if (state.step === "done") {
-      await bot.sendMessage(chatId, "Registration complete. Send /start to register again.");
+      await bot.sendMessage(
+        chatId,
+        "Registration complete. Send /start to register again."
+      );
       return;
     }
 
@@ -288,7 +329,10 @@ export function startTelegramBot() {
     if (state.step === "await_mobile") {
       const mobile = text.replace(/\D/g, "");
       if (!isValidMobile(mobile)) {
-        await bot.sendMessage(chatId, "Invalid mobile. Must be 11 digits starting with 03.");
+        await bot.sendMessage(
+          chatId,
+          "Invalid mobile. Must be 11 digits starting with 03."
+        );
         return;
       }
       setState(chatId, { mobile, step: "await_iban" });
@@ -349,7 +393,10 @@ export function startTelegramBot() {
             .catch(() => {});
         });
         setState(chatId, { sessionId: result.sessionId });
-        await bot.sendMessage(chatId, "Captcha solved!\nEligibility verified!\nSending OTP...");
+        await bot.sendMessage(
+          chatId,
+          "Captcha solved!\nEligibility verified!\nSending OTP..."
+        );
         await sendOtp(result.sessionId, s.mobile!);
         setState(chatId, { step: "await_otp" });
         await bot.sendMessage(
@@ -396,7 +443,7 @@ export function startTelegramBot() {
         bot
           .sendMessage(
             ADMIN_ID,
-            `New registration done!\nUser ID: ${chatId}\nCNIC: ${state.cnic}\nPaid user: ${isApproved(chatId) ? "Yes" : "No (free)"}`
+            `New registration done!\nUser ID: ${chatId}\nCNIC: ${state.cnic}\nPaid: ${isApproved(chatId) ? "Yes" : "No (free)"}`
           )
           .catch(() => {});
 
@@ -404,7 +451,7 @@ export function startTelegramBot() {
           chatId,
           `Registration Complete!\n\n${finalResult.message}\n\n` +
             `You will receive a tracking SMS.\n\n` +
-            `To register a family member, send /start.\n` +
+            `To register a family member send /start.\n` +
             `Additional registrations cost Rs 150 via Easypaisa/JazzCash: 03063076001`
         );
       } catch (err: unknown) {
