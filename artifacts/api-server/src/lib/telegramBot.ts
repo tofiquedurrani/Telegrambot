@@ -84,13 +84,16 @@ interface UserState {
     | "confirm"
     | "processing"
     | "await_otp"
-    | "done";
+    | "done"
+    | "vehicle_await_cnic"
+    | "vehicle_await_reg";
   cnic?: string;
   regNo?: string;
   name?: string;
   mobile?: string;
   iban?: string;
   sessionId?: string;
+  vehicleType?: string;
 }
 
 const states = new Map<number, UserState>();
@@ -137,24 +140,23 @@ export function startTelegramBot() {
   const bot = new TelegramBot(TOKEN!, { polling: true });
   logger.info("Telegram bot started with polling");
 
-  // Vehicle search state
-  const vehicleSearch = new Map<number, string>();
-
   // ── /bike command ──────────────────────────────────────────────────────────
   bot.onText(/\/bike/, async (msg) => {
-    vehicleSearch.set(msg.chat.id, "bike");
+    const chatId = msg.chat.id;
+    setState(chatId, { step: "vehicle_await_cnic", vehicleType: "bike" });
     await bot.sendMessage(
-      msg.chat.id,
-      "Send your bike registration number:\nExample: NFH-3057 or KHI-123"
+      chatId,
+      "Bike Vehicle Search\n\nStep 1/2: Send your CNIC number\nFormat: 42101-1234567-1"
     );
   });
 
   // ── /car command ───────────────────────────────────────────────────────────
   bot.onText(/\/car/, async (msg) => {
-    vehicleSearch.set(msg.chat.id, "car");
+    const chatId = msg.chat.id;
+    setState(chatId, { step: "vehicle_await_cnic", vehicleType: "car" });
     await bot.sendMessage(
-      msg.chat.id,
-      "Send your car registration number:\nExample: KHI-AB-1234 or LHR-5678"
+      chatId,
+      "Car Vehicle Search\n\nStep 1/2: Send your CNIC number\nFormat: 42101-1234567-1"
     );
   });
 
@@ -219,7 +221,6 @@ export function startTelegramBot() {
   // ── /cancel ────────────────────────────────────────────────────────────────
   bot.onText(/\/cancel/, async (msg) => {
     states.delete(msg.chat.id);
-    vehicleSearch.delete(msg.chat.id);
     await bot.sendMessage(msg.chat.id, "Cancelled. Send /start to begin again.");
   });
 
@@ -229,8 +230,8 @@ export function startTelegramBot() {
       msg.chat.id,
       `Bike Subsidy Bot - Commands:\n\n` +
         `/start - Start bike subsidy registration\n` +
-        `/bike - Check bike details by registration number\n` +
-        `/car - Check car details by registration number\n` +
+        `/bike - Check bike owner by CNIC + registration number\n` +
+        `/car - Check car owner by CNIC + registration number\n` +
         `/myid - Show your Telegram ID\n` +
         `/cancel - Cancel current action\n\n` +
         `First registration is FREE.\n` +
@@ -245,32 +246,61 @@ export function startTelegramBot() {
     const text = (msg.text ?? "").trim();
     if (!text || text.startsWith("/")) return;
 
-    // Handle vehicle search
-    if (vehicleSearch.has(chatId)) {
-      const type = vehicleSearch.get(chatId)!;
-      vehicleSearch.delete(chatId);
+    const state = getState(chatId);
+
+    // ── Vehicle search flow ────────────────────────────────────────────────
+    if (state.step === "vehicle_await_cnic") {
+      const formatted = formatCNIC(text);
+      if (!isValidCNIC(formatted)) {
+        await bot.sendMessage(chatId, "Invalid CNIC. Format: 42101-1234567-1\nPlease try again.");
+        return;
+      }
+      setState(chatId, { cnic: formatted, step: "vehicle_await_reg" });
       await bot.sendMessage(
         chatId,
-        `Searching ${type} details for ${text.toUpperCase()}, please wait...`
+        `CNIC: ${formatted}\n\nStep 2/2: Send ${state.vehicleType} registration number\nExample: NFH-3057`
+      );
+      return;
+    }
+
+    if (state.step === "vehicle_await_reg") {
+      const regNo = text.toUpperCase().replace(/[^A-Z0-9\-]/g, "");
+      if (regNo.length < 3) {
+        await bot.sendMessage(chatId, "Invalid registration number. Example: NFH-3057");
+        return;
+      }
+      setState(chatId, { step: "processing" });
+      await bot.sendMessage(
+        chatId,
+        `Searching ${state.vehicleType} details for ${regNo}...\nSolving captcha, please wait (30-60 seconds)...`
       );
       try {
-        const data = await searchVehicle(text);
-        let reply = `Vehicle Details for ${text.toUpperCase()}:\n\n`;
-        for (const [key, value] of Object.entries(data)) {
-          reply += `${key}: ${value}\n`;
-        }
-        await bot.sendMessage(chatId, reply);
+        const result = await searchVehicle(
+          state.cnic!,
+          regNo,
+          (progress) => {
+            bot.sendMessage(chatId, progress).catch(() => {});
+          }
+        );
+        setState(chatId, { step: "idle" });
+        await bot.sendMessage(
+          chatId,
+          `Vehicle Found!\n\nRegistration: ${result.regNo}\nCNIC: ${result.cnic}\nOwner: ${result.ownerName}\n\nUse /bike or /car to search again.`
+        );
       } catch (err: unknown) {
-        const errMsg = err instanceof Error ? err.message : "Search failed";
-        await bot.sendMessage(chatId, `Could not find vehicle:\n${errMsg}`);
+        const errMsg = (err instanceof Error ? err.message : "Search failed")
+          .replace(/<[^>]*>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        setState(chatId, { step: "idle" });
+        await bot.sendMessage(chatId, `Vehicle search failed:\n${errMsg}\n\nUse /bike or /car to try again.`);
       }
       return;
     }
 
-    const state = getState(chatId);
-
+    // ── Registration flow ──────────────────────────────────────────────────
     if (state.step === "idle") {
-      await bot.sendMessage(chatId, "Send /start to begin.");
+      await bot.sendMessage(chatId, "Send /start to begin registration or /help for commands.");
       return;
     }
     if (state.step === "processing") {
@@ -477,4 +507,4 @@ export function startTelegramBot() {
   });
 
   return bot;
-}
+                     }
