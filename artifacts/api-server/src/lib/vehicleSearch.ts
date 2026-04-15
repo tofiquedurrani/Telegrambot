@@ -1,18 +1,81 @@
 import { logger } from "./logger";
-import { solveCaptcha } from "./govProxy";
 
-const FSP_BASE = "https://fsp.excise.gos.pk";
-const ELIGIBILITY_URL = `${FSP_BASE}/Home/bike_subsidies_check_vehicle_eligibility/`;
+const SEARCH_URL = "https://excise.gos.pk/vehicle/vehicle_search";
 
-async function getSessionCookies(): Promise<string> {
-  const res = await fetch(`${FSP_BASE}/`, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    },
+const HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Accept-Encoding": "gzip, deflate, br",
+  "Connection": "keep-alive",
+};
+
+async function getPageToken(): Promise<{ token: string; cookies: string }> {
+  const res = await fetch(SEARCH_URL, {
+    headers: HEADERS,
+    redirect: "follow",
   });
+
+  logger.info({ status: res.status }, "Vehicle search page loaded");
+
   const rawCookies = res.headers.getSetCookie?.() ?? [];
-  return rawCookies.map((c) => c.split(";")[0]).join("; ");
+  const cookies = rawCookies.map((c) => c.split(";")[0]).join("; ");
+  const html = await res.text();
+
+  logger.info({ htmlLen: html.length, preview: html.slice(0, 200) }, "Page HTML preview");
+
+  const patterns = [
+    /<meta name="csrf-token" content="([^"]+)"/,
+    /<meta name='csrf-token' content='([^']+)'/,
+    /name=['"_]token['"]\s+value="([^"]+)"/,
+    /name=['"_]token['"]\s+value='([^']+)'/,
+    /"_token"\s*:\s*"([^"]+)"/,
+    /csrf_token['"]\s*:\s*['"]([^'"]+)['"]/,
+    /<input[^>]+name="_token"[^>]+value="([^"]+)"/,
+    /<input[^>]+value="([^"]+)"[^>]+name="_token"/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match) {
+      logger.info("CSRF token found");
+      return { token: match[1], cookies };
+    }
+  }
+
+  logger.warn({ htmlPreview: html.slice(0, 500) }, "CSRF token not found in page");
+  throw new Error(`Could not load search page (status ${res.status}). The site may be temporarily unavailable.`);
+}
+
+function parseVehicleDetails(html: string): Record<string, string> {
+  const result: Record<string, string> = {};
+
+  // Try parsing table rows
+  const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let rowMatch;
+  while ((rowMatch = rowRegex.exec(html)) !== null) {
+    const cells: string[] = [];
+    const cellRegex = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+    let cellMatch;
+    while ((cellMatch = cellRegex.exec(rowMatch[1])) !== null) {
+      const val = cellMatch[1].replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+      if (val) cells.push(val);
+    }
+    if (cells.length >= 2 && cells[0]) {
+      result[cells[0]] = cells[1] || "";
+    }
+  }
+
+  // Also try definition list format
+  const dtRegex = /<dt[^>]*>([\s\S]*?)<\/dt>\s*<dd[^>]*>([\s\S]*?)<\/dd>/gi;
+  let dtMatch;
+  while ((dtMatch = dtRegex.exec(html)) !== null) {
+    const key = dtMatch[1].replace(/<[^>]*>/g, "").trim();
+    const val = dtMatch[2].replace(/<[^>]*>/g, "").trim();
+    if (key && val) result[key] = val;
+  }
+
+  return result;
 }
 
 export interface VehicleResult {
@@ -23,56 +86,52 @@ export interface VehicleResult {
 }
 
 export async function searchVehicle(
-  cnic: string,
   regNo: string,
   onProgress?: (msg: string) => void
-): Promise<VehicleResult> {
-  logger.info({ cnic, regNo }, "Vehicle search started");
+): Promise<Record<string, string>> {
+  logger.info({ regNo }, "Vehicle search started");
 
-  onProgress?.("Getting session...");
-  const cookies = await getSessionCookies();
+  onProgress?.("Connecting to vehicle database...");
+  const { token, cookies } = await getPageToken();
 
-  onProgress?.("Solving captcha (30-60 seconds, please wait)...");
-  const captchaToken = await solveCaptcha(
-    onProgress ? (elapsed: number) => onProgress(`Still solving captcha... (${elapsed}s)`) : undefined
-  );
+  onProgress?.("Searching vehicle details...");
 
-  onProgress?.("Captcha solved! Checking vehicle...");
-
-  const res = await fetch(ELIGIBILITY_URL, {
+  const res = await fetch(SEARCH_URL, {
     method: "POST",
     headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+      ...HEADERS,
       "Content-Type": "application/x-www-form-urlencoded",
       "Cookie": cookies,
-      "Referer": FSP_BASE + "/",
-      "Origin": FSP_BASE,
+      "Referer": SEARCH_URL,
+      "Origin": "https://excise.gos.pk",
       "X-Requested-With": "XMLHttpRequest",
-      "Accept": "application/json, text/javascript, */*; q=0.01",
     },
     body: new URLSearchParams({
-      cnic: cnic.trim(),
-      reg_no: regNo.trim().toUpperCase(),
-      "g-recaptcha-response": captchaToken,
+      _token: token,
+      registration_no: regNo.trim().toUpperCase(),
     }).toString(),
   });
 
-  const data = await res.json() as { status: string; message?: string; owner_name?: string; token_id?: string };
-  logger.info({ data }, "Vehicle search response");
+  logger.info({ status: res.status }, "Vehicle search POST response");
+  const html = await res.text();
+  logger.info({ htmlLen: html.length, preview: html.slice(0, 300) }, "Vehicle search result preview");
 
-  if (data.status === "success" && data.owner_name) {
-    return {
-      ownerName: data.owner_name,
-      cnic: cnic.trim(),
-      regNo: regNo.trim().toUpperCase(),
-      status: "found",
-    };
+  const lower = html.toLowerCase();
+  if (
+    lower.includes("no record") ||
+    lower.includes("not found") ||
+    lower.includes("invalid registration") ||
+    lower.includes("no vehicle")
+  ) {
+    throw new Error(`No vehicle found for registration: ${regNo.toUpperCase()}`);
   }
 
-  if (data.status === "error" || data.status === "warning") {
-    const msg = typeof data.message === "string" ? data.message : JSON.stringify(data.message);
-    throw new Error(msg || "Vehicle not found");
+  const data = parseVehicleDetails(html);
+
+  if (Object.keys(data).length === 0) {
+    logger.warn({ htmlPreview: html.slice(0, 500) }, "No data parsed from response");
+    throw new Error("No vehicle details found. Please check the registration number and try again.");
   }
 
-  throw new Error("Unexpected response from vehicle search");
+  return data;
 }
