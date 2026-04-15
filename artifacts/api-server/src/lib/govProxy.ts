@@ -43,7 +43,7 @@ async function check2CaptchaBalance(): Promise<number> {
   return parseFloat(data.request);
 }
 
-async function solveCaptcha(onProgress?: (elapsed: number) => void): Promise<string> {
+export async function solveCaptcha(onProgress?: (elapsed: number) => void): Promise<string> {
   if (!TWO_CAPTCHA_KEY) throw new Error("TWO_CAPTCHA_API_KEY is not set");
 
   const balance = await check2CaptchaBalance();
@@ -55,14 +55,14 @@ async function solveCaptcha(onProgress?: (elapsed: number) => void): Promise<str
   logger.info("Submitting captcha to 2captcha...");
 
   const params = new URLSearchParams({
-  key: TWO_CAPTCHA_KEY,
-  method: "userrecaptcha",
-  googlekey: RECAPTCHA_SITE_KEY,
-  pageurl: `${GOV_BASE}/home/bike_subsidies`,
-  json: "1",
-  soft_id: "0",
-  priority: "10",
-});
+    key: TWO_CAPTCHA_KEY,
+    method: "userrecaptcha",
+    googlekey: RECAPTCHA_SITE_KEY,
+    pageurl: `${GOV_BASE}/home/bike_subsidies`,
+    json: "1",
+    soft_id: "0",
+    priority: "10",
+  });
 
   const submitRes = await fetch(`https://2captcha.com/in.php?${params}`);
   const submitData = await submitRes.json() as { status: number; request: string };
@@ -166,8 +166,6 @@ export async function sendOtp(sessionId: string, mobile: string): Promise<{ time
   const session = sessions.get(sessionId);
   if (!session) throw new Error("Session not found. Please restart registration.");
 
-  // Convert local format (03001234567) to international format (923001234567)
-  // so the government site does not double-add +92
   const intlMobile = mobile.startsWith("0") ? "92" + mobile.slice(1) : mobile;
 
   const result = await govPost("bike_subsidies_get_otp", session.cookies, {
